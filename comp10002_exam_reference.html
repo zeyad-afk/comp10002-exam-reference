@@ -1,0 +1,908 @@
+<div id="app"></div>
+<script>
+const DATA = {
+  hash: {
+    label: "Hash table",
+    icon: "ti-hash",
+    items: [
+      {
+        name: "oa_find",
+        when: "Search/lookup a key in an open-addressing hash table.",
+        logic: "1. Hash the key to get a starting slot.\n2. Walk forward (wrap with % table_size) checking each slot.\n3. OCCUPIED + key matches \u2192 return that index.\n4. EMPTY \u2192 stop searching, return -1.\n5. DELETED \u2192 skip past it, keep going.\n6. Bound the loop by table_size so it can never spin forever.",
+        why: "Linear probing means a key may not sit at its 'home' slot if there was a collision \u2014 you must follow the probe trail it took when inserted. EMPTY means nothing was EVER placed here, so the key can't be further along. DELETED means something WAS here but got removed \u2014 later keys may have probed PAST it during insertion, so you must keep searching or you'll wrongly report 'not found'.",
+        trigger: "EMPTY stops you. DELETED never does.",
+        code: `int oa_find(slot_t table[], int table_size, int key) {
+    int slot = hash_key(key, table_size);
+    int i = 0;
+    while (i < table_size) {
+        if (table[slot].state == OCCUPIED &&
+            table[slot].key == key) {
+            return slot;
+        }
+        if (table[slot].state == EMPTY) {
+            return -1;
+        }
+        slot = (slot + 1) % table_size;
+        i++;
+    }
+    return -1;
+}`
+      },
+      {
+        name: "oa_add",
+        when: "Insert a new key into an open-addressing hash table.",
+        logic: "1. Hash the key to get a starting slot.\n2. Walk forward while the slot is OCCUPIED.\n3. Stop at the first slot that is EMPTY or DELETED.\n4. Write the key there and mark it OCCUPIED.",
+        why: "Both EMPTY and DELETED slots are safe to write into \u2014 EMPTY never held anything, DELETED no longer holds anything live. Either way the spot is free for reuse.",
+        trigger: "Skip OCCUPIED. Land on anything else.",
+        code: `void oa_add(slot_t table[], int table_size, int key) {
+    int slot = hash_key(key, table_size);
+    while (table[slot].state == OCCUPIED) {
+        slot = (slot + 1) % table_size;
+    }
+    table[slot].key = key;
+    table[slot].state = OCCUPIED;
+}`
+      },
+      {
+        name: "oa_delete",
+        when: "Remove a key from an open-addressing hash table.",
+        logic: "Same probe-walk as oa_find. But on a match, don't return an index \u2014 set state = DELETED (never EMPTY), then return.",
+        why: "If you marked the slot EMPTY instead, you'd break searches for OTHER keys that collided and probed past this slot during insertion \u2014 their search would stop early at the now-EMPTY slot and wrongly report 'not found'.",
+        trigger: "Delete means DELETED. Never EMPTY.",
+        code: `void oa_delete(slot_t table[], int table_size, int key) {
+    int slot = hash_key(key, table_size);
+    int i = 0;
+    while (i < table_size) {
+        if (table[slot].state == EMPTY) {
+            return;
+        }
+        if (table[slot].state == OCCUPIED &&
+            table[slot].key == key) {
+            table[slot].state = DELETED;
+            return;
+        }
+        slot = (slot + 1) % table_size;
+        i++;
+    }
+}`
+      },
+      {
+        name: "chaining_query",
+        when: "Check whether a key exists in a chained hash table.",
+        logic: "1. Hash the key to get a slot index.\n2. That slot holds the HEAD of a linked list, not a single value.\n3. Walk that list (curr = curr->next) checking curr->key == key.\n4. Match \u2192 return true. Reach NULL \u2192 return false.",
+        why: "Chaining handles collisions by letting each bucket grow a small linked list instead of probing elsewhere. So checking a bucket means a normal list traversal, not a single comparison.",
+        trigger: "Slot holds a list head, not a value \u2014 walk it.",
+        code: `bool chaining_query(hash_table_t *ht, int key) {
+    int slot = key % ht->size;
+    node_t *curr = ht->table[slot];
+    while (curr != NULL) {
+        if (curr->key == key) return true;
+        curr = curr->next;
+    }
+    return false;
+}`
+      },
+      {
+        name: "chaining_add",
+        when: "Insert a key into a chained hash table.",
+        logic: "1. Hash the key to get a slot index.\n2. malloc + assert a new node.\n3. Fill in its key.\n4. Point new->next at the CURRENT head (ht->table[slot]).\n5. Make new the new head (ht->table[slot] = new).",
+        why: "This is identical to insert_at_head for a plain linked list \u2014 ht->table[slot] just plays the role of head. Prepending is O(1): you never walk the list to insert.",
+        trigger: "Same shape as insert_at_head. Order matters: link old head into new->next BEFORE overwriting the head pointer.",
+        code: `void chaining_add(hash_table_t *ht, int key) {
+    int slot = key % ht->size;
+    node_t *new = malloc(sizeof(*new));
+    assert(new != NULL);
+    new->key = key;
+    new->next = ht->table[slot];
+    ht->table[slot] = new;
+}`
+      },
+      {
+        name: "chaining_delete",
+        when: "Remove a key from a chained hash table.",
+        logic: "1. Hash to find the slot.\n2. Walk the list with curr/prev pointers.\n3. On match: if prev is NULL (match is the head) update ht->table[slot] directly; otherwise update prev->next.\n4. free(curr) and return.",
+        why: "Same two-case split as a normal linked-list delete \u2014 deleting the head needs special handling because nothing points TO it except the bucket's head pointer itself.",
+        trigger: "prev == NULL means 'this was the head' \u2014 fix the bucket pointer, not prev->next.",
+        code: `void chaining_delete(hash_table_t *ht, int key) {
+    int slot = key % ht->size;
+    node_t *curr = ht->table[slot];
+    node_t *prev = NULL;
+    while (curr != NULL) {
+        if (curr->key == key) {
+            if (prev == NULL) {
+                ht->table[slot] = curr->next;
+            } else {
+                prev->next = curr->next;
+            }
+            free(curr);
+            return;
+        }
+        prev = curr;
+        curr = curr->next;
+    }
+}`
+      }
+    ]
+  },
+  list: {
+    label: "Linked list",
+    icon: "ti-list",
+    items: [
+      {
+        name: "make_empty_list",
+        when: "Create a brand new, empty list before inserting anything.",
+        logic: "malloc + assert a list_t handle. Set head = NULL and foot = NULL. Return it.",
+        why: "An empty list is defined as having no nodes \u2014 both head and foot must point at nothing, or later functions (like insert_at_foot) will read garbage.",
+        trigger: "Container struct, not a node. Both pointers NULL.",
+        code: `list_t *make_empty_list(void) {
+    list_t *new = malloc(sizeof(*new));
+    assert(new != NULL);
+    new->head = NULL;
+    new->foot = NULL;
+    return new;
+}`
+      },
+      {
+        name: "is_empty",
+        when: "Check whether a list has any nodes before operating on it.",
+        logic: "Return true if head == NULL.",
+        why: "make_empty_list sets head = NULL specifically so this check works. No nodes means head was never updated away from NULL.",
+        trigger: "One line: return (list->head == NULL);",
+        code: `int is_empty(list_t *list) {
+    return (list->head == NULL);
+}`
+      },
+      {
+        name: "insert_at_head",
+        when: "Add a new node to the FRONT of a list.",
+        logic: "1. malloc + assert new node.\n2. Set its data.\n3. Point new->next at the OLD head.\n4. Return new (it's the new head now).",
+        why: "Caller must reassign list->head = insert_at_head(...) since the head pointer itself changes.",
+        trigger: "Allocate \u2192 fill \u2192 link to old head \u2192 return new node.",
+        code: `node_t *insert_at_head(node_t *head, int data) {
+    node_t *new_node = malloc(sizeof(*new_node));
+    assert(new_node != NULL);
+    new_node->data = data;
+    new_node->next = head;
+    return new_node;
+}`
+      },
+      {
+        name: "insert_at_foot",
+        when: "Add a new node to the END of a list.",
+        logic: "1. malloc + assert, set data, set next = NULL (it's the new last node).\n2. If list is empty (foot == NULL): this node becomes head too.\n3. Else: old foot's next must point at new node.\n4. Either way, foot = new at the end.",
+        why: "Two genuinely different cases: an empty list has no existing node to link from, so head itself must be set. A non-empty list just needs the OLD last node relinked.",
+        trigger: "Empty-list case sets head. Non-empty case sets foot->next = new (assignment, not ->).",
+        code: `list_t *insert_at_foot(list_t *list, int value) {
+    node_t *new = malloc(sizeof(*new));
+    assert(new != NULL);
+    new->data = value;
+    new->next = NULL;
+
+    if (list->foot == NULL) {
+        list->head = new;
+    } else {
+        list->foot->next = new;
+    }
+    list->foot = new;
+    return list;
+}`
+      },
+      {
+        name: "print_list",
+        when: "Display every value in a list, in order.",
+        logic: "Start curr at head. While curr != NULL, print curr->data, then curr = curr->next.",
+        why: "Standard forward traversal \u2014 the base pattern every other list function builds on.",
+        trigger: "The pattern: start at head, walk while not NULL.",
+        code: `void print_list(list_t *list) {
+    node_t *curr = list->head;
+    while (curr != NULL) {
+        printf("%d ", curr->data);
+        curr = curr->next;
+    }
+}`
+      },
+      {
+        name: "delete",
+        when: "Remove a node holding a specific value from a list.",
+        logic: "1. Special case: if head itself matches, save head->next, free head, return the new head.\n2. Otherwise walk with curr/prev. On match: prev->next = curr->next, free(curr), return original head.\n3. If never found, return head unchanged.",
+        why: "Deleting the head needs special handling because there's no 'prev' node before it to update \u2014 you must fix the head pointer directly instead.",
+        trigger: "Head-match is a SEPARATE check before the main loop, not inside it.",
+        code: `node_t *delete(node_t *head, int data) {
+    if (head->data == data) {
+        node_t *new_head = head->next;
+        free(head);
+        return new_head;
+    }
+    node_t *curr = head;
+    node_t *prev = NULL;
+    while (curr != NULL) {
+        if (curr->data == data) {
+            prev->next = curr->next;
+            free(curr);
+            return head;
+        }
+        prev = curr;
+        curr = curr->next;
+    }
+    return head;
+}`
+      },
+      {
+        name: "free_list",
+        when: "Destroy an entire list and reclaim all its memory.",
+        logic: "1. curr = head.\n2. While curr != NULL: save temp = curr->next BEFORE freeing curr, then free(curr), then curr = temp.\n3. After the loop, free the list_t container itself.",
+        why: "Once you free(curr), reading curr->next afterward is undefined behavior \u2014 the memory is gone. You must save the next pointer FIRST, while it's still safe to read.",
+        trigger: "Save next \u2192 THEN free \u2192 THEN advance. Never free then read.",
+        code: `void free_list(list_t *list) {
+    node_t *curr = list->head;
+    while (curr != NULL) {
+        node_t *temp = curr->next;
+        free(curr);
+        curr = temp;
+    }
+    free(list);
+    list = NULL;
+}`
+      },
+      {
+        name: "delete_first (cmp)",
+        when: "Delete the first node matching a value, using a custom comparator function pointer.",
+        logic: "Same shape as delete(), but instead of curr->data == data, call cmp(curr->data, value) == 0 to test a match \u2014 lets the same function work for any struct field.",
+        why: "Using a function pointer means the deletion logic doesn't need to know WHAT field defines a match \u2014 the caller supplies that via cmp.",
+        trigger: "Replace == with cmp(...) == 0 everywhere a comparison was needed.",
+        code: `list_t *delete_first(list_t *list, int value,
+                      int (*cmp)(int, int)) {
+    if (cmp(list->head->data, value) == 0) {
+        node_t *new_head = list->head->next;
+        free(list->head);
+        list->head = new_head;
+        return list;
+    }
+    node_t *curr = list->head;
+    node_t *prev = NULL;
+    while (curr != NULL) {
+        if (cmp(curr->data, value) == 0) {
+            prev->next = curr->next;
+            free(curr);
+            return list;
+        }
+        prev = curr;
+        curr = curr->next;
+    }
+    return list;
+}`
+      }
+    ]
+  },
+  stack: {
+    label: "Stack",
+    icon: "ti-layers-intersect",
+    items: [
+      {
+        name: "push",
+        when: "Add a value to the top of a stack.",
+        logic: "malloc + assert a new node. Set its data. Point new->next at the current stack->head. Make stack->head = new.",
+        why: "A stack's 'top' is just the head of a linked list \u2014 pushing is identical to insert_at_head, just renamed.",
+        trigger: "push = insert_at_head wearing a different name.",
+        code: `void push(stack_t *stack, int data) {
+    node_t *new_node = malloc(sizeof(*new_node));
+    assert(new_node != NULL);
+    new_node->data = data;
+    new_node->next = stack->head;
+    stack->head = new_node;
+}`
+      },
+      {
+        name: "pop",
+        when: "Remove and return the value on top of a stack.",
+        logic: "Save head->data into a variable. Save the old head pointer. Move stack->head to old_head->next. Free old_head. Return the saved value.",
+        why: "Must save the data BEFORE freeing the node, and save the old head pointer BEFORE moving stack->head \u2014 same 'save before destroy' rule as free_list.",
+        trigger: "Save value + save old head \u2192 advance head \u2192 free old \u2192 return value.",
+        code: `int pop(stack_t *stack) {
+    int value = stack->head->data;
+    node_t *old_head = stack->head;
+    stack->head = old_head->next;
+    free(old_head);
+    return value;
+}`
+      },
+      {
+        name: "peek / stack_top",
+        when: "Look at the top value WITHOUT removing it.",
+        logic: "If stack is empty, handle gracefully (print message, return -1). Otherwise return stack->head->data.",
+        why: "Unlike pop, nothing is removed \u2014 no free, no pointer change. Just reads.",
+        trigger: "peek never frees or relinks anything.",
+        code: `int peek(stack_t *stack) {
+    if (stack->head == NULL) {
+        printf("stack empty\\n");
+        return -1;
+    }
+    return stack->head->data;
+}`
+      },
+      {
+        name: "is_empty",
+        when: "Check if a stack has anything in it.",
+        logic: "Return (stack->head == NULL).",
+        why: "Identical idea to a list's is_empty \u2014 head NULL means nothing's there.",
+        trigger: "Same one-liner as list is_empty.",
+        code: `int is_empty(stack_t *stack) {
+    return (stack->head == NULL);
+}`
+      },
+      {
+        name: "make_empty_stack",
+        when: "Create a new, empty stack.",
+        logic: "malloc + assert the stack_t handle. Set head = NULL. Return it.",
+        why: "Only one pointer to track (head) \u2014 unlike a list/queue, a stack has no foot.",
+        trigger: "Only head needs to be NULLed, not foot.",
+        code: `stack_t *make_empty_stack(void) {
+    stack_t *new = malloc(sizeof(*new));
+    assert(new != NULL);
+    new->head = NULL;
+    return new;
+}`
+      },
+      {
+        name: "free_stack",
+        when: "Destroy a stack and free all its memory.",
+        logic: "Walk and free every node (save-next-before-free pattern), then free the stack_t container.",
+        why: "Identical shape to free_list \u2014 a stack is just a linked list with restricted operations.",
+        trigger: "Same as free_list, different struct name.",
+        code: `void free_stack(stack_t *stack) {
+    node_t *curr = stack->head;
+    while (curr != NULL) {
+        node_t *temp = curr->next;
+        free(curr);
+        curr = temp;
+    }
+    free(stack);
+}`
+      }
+    ]
+  },
+  queue: {
+    label: "Queue",
+    icon: "ti-arrow-bar-to-right",
+    items: [
+      {
+        name: "enqueue",
+        when: "Add a value to the BACK of a queue.",
+        logic: "malloc + assert new node, set data, set next = NULL. Link the OLD foot's next to point at new. Make new the new foot.",
+        why: "Holding a direct foot pointer means you never traverse the queue to find the end \u2014 that's what makes enqueue O(1).",
+        trigger: "foot->next = new, THEN foot = new.",
+        code: `void enqueue(queue_t *queue, int data) {
+    node_t *new_node = malloc(sizeof(*new_node));
+    assert(new_node != NULL);
+    new_node->data = data;
+    new_node->next = NULL;
+    queue->foot->next = new_node;
+    queue->foot = new_node;
+}`
+      },
+      {
+        name: "dequeue",
+        when: "Remove and return the value at the FRONT of a queue.",
+        logic: "Save head->data and the old head pointer. Move head to old_head->next. If the new head is NULL (queue just became empty), ALSO set foot = NULL. Free old_head, return value.",
+        why: "If only one node existed, removing it leaves BOTH head and foot dangling unless you explicitly null out foot too \u2014 forgetting this causes a use-after-free the next time enqueue runs.",
+        trigger: "Update head first, THEN check if foot also needs nulling.",
+        code: `int dequeue(queue_t *queue) {
+    int value = queue->head->data;
+    node_t *old_head = queue->head;
+    queue->head = old_head->next;
+    if (queue->head == NULL) {
+        queue->foot = NULL;
+    }
+    free(old_head);
+    return value;
+}`
+      },
+      {
+        name: "is_empty",
+        when: "Check if a queue has anything in it.",
+        logic: "Return (queue->head == NULL).",
+        why: "Same logic as stack/list \u2014 empty means head points nowhere.",
+        trigger: "Same one-liner, every structure.",
+        code: `int is_empty(queue_t *queue) {
+    return (queue->head == NULL);
+}`
+      },
+      {
+        name: "make_empty_queue",
+        when: "Create a new, empty queue.",
+        logic: "malloc + assert the queue_t handle. Set BOTH head = NULL and foot = NULL.",
+        why: "A queue (unlike a stack) tracks both ends, so both must start NULL.",
+        trigger: "Two pointers to null, not one.",
+        code: `queue_t *make_empty_queue(void) {
+    queue_t *new = malloc(sizeof(*new));
+    assert(new != NULL);
+    new->head = NULL;
+    new->foot = NULL;
+    return new;
+}`
+      },
+      {
+        name: "free_queue",
+        when: "Destroy a queue and free all its memory.",
+        logic: "Same save-next-before-free traversal as free_list/free_stack, then free the container.",
+        why: "Same underlying linked structure, same destruction pattern.",
+        trigger: "Same shape, every linked structure.",
+        code: `void free_queue(queue_t *queue) {
+    node_t *curr = queue->head;
+    while (curr != NULL) {
+        node_t *temp = curr->next;
+        free(curr);
+        curr = temp;
+    }
+    free(queue);
+}`
+      }
+    ]
+  },
+  bst: {
+    label: "BST",
+    icon: "ti-binary-tree",
+    items: [
+      {
+        name: "bst_search",
+        when: "Check if a key exists in a binary search tree.",
+        logic: "If root is NULL, not found (0). If key matches root->data, found (1). If key is smaller, recurse left. Else recurse right.",
+        why: "BST property: everything left of a node is smaller, everything right is bigger \u2014 so you only ever need to check ONE side at each step.",
+        trigger: "Smaller \u2192 left. Bigger \u2192 right. NULL \u2192 not found.",
+        code: `int bst_search(node_t *root, int key) {
+    if (root == NULL) return 0;
+    if (key == root->data) return 1;
+    if (key < root->data)
+        return bst_search(root->left, key);
+    else
+        return bst_search(root->right, key);
+}`
+      },
+      {
+        name: "bst_insert",
+        when: "Add a new key into a binary search tree, keeping it valid.",
+        logic: "If root is NULL, this is where the new node belongs \u2014 allocate and return it. Otherwise recurse left or right based on comparison, and RELINK that side to the recursive result.",
+        why: "The relink step (root->left = bst_insert(...)) is what actually attaches the new node \u2014 without it the new node is created but never connected to the tree.",
+        trigger: "Always reassign root->left or root->right to the recursive call's result.",
+        code: `node_t *bst_insert(node_t *root, int key) {
+    if (root == NULL) {
+        node_t *new = malloc(sizeof(*new));
+        assert(new != NULL);
+        new->data = key;
+        new->left = NULL;
+        new->right = NULL;
+        return new;
+    }
+    if (key < root->data)
+        root->left = bst_insert(root->left, key);
+    else
+        root->right = bst_insert(root->right, key);
+    return root;
+}`
+      },
+      {
+        name: "find_min / find_max",
+        when: "Find the smallest (or largest) value in a BST \u2014 used inside bst_delete.",
+        logic: "find_min: keep following ->left until it's NULL. find_max: keep following ->right until it's NULL.",
+        why: "BST property guarantees the smallest value is always as far left as possible, largest as far right \u2014 no comparisons needed, just follow one direction.",
+        trigger: "All the way left = min. All the way right = max.",
+        code: `node_t *find_min(node_t *root) {
+    if (root == NULL) return NULL;
+    while (root->left != NULL) {
+        root = root->left;
+    }
+    return root;
+}`
+      },
+      {
+        name: "count_nodes / tree_height",
+        when: "Count all nodes, or measure how tall a tree is.",
+        logic: "count_nodes: NULL returns 0, otherwise 1 + count(left) + count(right). tree_height: NULL returns -1, otherwise 1 + the taller of the two child heights.",
+        why: "Classic 'combine the two recursive sub-results' pattern \u2014 every node's answer depends on both its children's answers.",
+        trigger: "Base case at NULL, then combine left + right + something for the current node.",
+        code: `int count_nodes(node_t *root) {
+    if (root == NULL) return 0;
+    return 1 + count_nodes(root->left)
+             + count_nodes(root->right);
+}
+
+int tree_height(node_t *root) {
+    if (root == NULL) return -1;
+    int lh = tree_height(root->left);
+    int rh = tree_height(root->right);
+    return (lh > rh ? lh : rh) + 1;
+}`
+      },
+      {
+        name: "print_inorder",
+        when: "Print all values in sorted order.",
+        logic: "Recurse left, THEN print current node, THEN recurse right.",
+        why: "Left-current-right visits nodes in ascending order precisely because of the BST property \u2014 this exact ordering is what makes it 'inorder'.",
+        trigger: "Left, then print, then right \u2014 print goes in the MIDDLE.",
+        code: `void print_inorder(node_t *root) {
+    if (root == NULL) return;
+    print_inorder(root->left);
+    printf("%d ", root->data);
+    print_inorder(root->right);
+}`
+      },
+      {
+        name: "bst_free",
+        when: "Destroy an entire tree and free all its memory.",
+        logic: "Free left subtree, free right subtree, THEN free the current node.",
+        why: "You must free children BEFORE the parent \u2014 if you freed root first you'd lose your only way to reach root->left and root->right.",
+        trigger: "Children first, current node LAST (postorder).",
+        code: `void bst_free(node_t *root) {
+    if (root == NULL) return;
+    bst_free(root->left);
+    bst_free(root->right);
+    free(root);
+}`
+      },
+      {
+        name: "bst_delete",
+        when: "Remove a specific key from a BST while keeping it valid \u2014 the hardest function in the course.",
+        logic: "Navigate to the key (recursing left/right). Once found, 3 cases: (1) leaf node \u2014 just free and return NULL. (2) one child \u2014 free this node, return the surviving child. (3) two children \u2014 find the min of the right subtree (the successor), copy its DATA up into this node, then recursively delete that successor from the right subtree.",
+        why: "Case 3 is tricky because you can't just unlink a node with two children without breaking the tree \u2014 instead you replace its VALUE with the next-largest value (successor) and then delete that successor's old spot instead, which is guaranteed to be a simpler case (0 or 1 child).",
+        trigger: "Two children \u2192 borrow successor's data, then delete the successor recursively.",
+        code: `node_t *bst_delete(node_t *root, int key) {
+    if (root == NULL) return NULL;
+    if (key < root->data) {
+        root->left = bst_delete(root->left, key);
+    } else if (key > root->data) {
+        root->right = bst_delete(root->right, key);
+    } else {
+        if (root->left == NULL && root->right == NULL) {
+            free(root);
+            return NULL;
+        }
+        if (root->left == NULL) {
+            node_t *temp = root->right;
+            free(root);
+            return temp;
+        }
+        if (root->right == NULL) {
+            node_t *temp = root->left;
+            free(root);
+            return temp;
+        }
+        node_t *successor = find_min(root->right);
+        root->data = successor->data;
+        root->right = bst_delete(root->right, successor->data);
+    }
+    return root;
+}`
+      }
+    ]
+  },
+  heap: {
+    label: "Heaps",
+    icon: "ti-stack-3",
+    items: [
+      {
+        name: "max_heapify",
+        when: "Fix the heap property at one position, assuming its children are already valid heaps.",
+        logic: "Compute left/right child indices (2i+1, 2i+2). Find which of {node, left, right} is biggest. If it's not the current node, swap and recurse down into where the swap happened.",
+        why: "This 'sink down' step is the core engine every other heap operation calls \u2014 it assumes everything BELOW is already correct and only fixes the local violation.",
+        trigger: "left = 2i+1, right = 2i+2. Recurse into 'big' after swapping, not into i.",
+        code: `void max_heapify(int A[], int n, int i) {
+    int left = 2*i + 1;
+    int right = 2*i + 2;
+    int big = i;
+    if (left < n && A[left] > A[big]) big = left;
+    if (right < n && A[right] > A[big]) big = right;
+    if (big != i) {
+        swap(&A[i], &A[big]);
+        max_heapify(A, n, big);
+    }
+}`
+      },
+      {
+        name: "build_max_heap",
+        when: "Turn an arbitrary unsorted array into a valid max-heap.",
+        logic: "Starting from the last non-leaf node (n/2 - 1) down to index 0, call max_heapify at each position.",
+        why: "Working backward from the bottom up guarantees that by the time you heapify position i, everything below i is already a valid heap \u2014 satisfying max_heapify's assumption.",
+        trigger: "Start at n/2 - 1, go DOWN to 0 (not up).",
+        code: `void build_max_heap(int A[], int n) {
+    for (int i = n/2 - 1; i >= 0; i--) {
+        max_heapify(A, n, i);
+    }
+}`
+      },
+      {
+        name: "heap_extract_max",
+        when: "Remove and return the largest element (the root) from a max-heap.",
+        logic: "Save A[0] (the max). Move the LAST element into A[0]. Shrink n by one. Call max_heapify(A, n, 0) to restore the property.",
+        why: "Moving the last element to the root and re-sinking it is far cheaper than re-sorting everything \u2014 this is what gives heap operations O(log n) cost.",
+        trigger: "Last element moves to the front, THEN heapify from the top.",
+        code: `int heap_extract_max(int A[], int *n) {
+    if (*n < 1) {
+        printf("heap underflow\\n");
+        return -1;
+    }
+    int max = A[0];
+    A[0] = A[*n - 1];
+    (*n)--;
+    max_heapify(A, *n, 0);
+    return max;
+}`
+      },
+      {
+        name: "heap_insert",
+        when: "Add a new key into a max-heap, keeping it valid.",
+        logic: "Place the new key at the END of the array (index n), increment n. Then 'bubble up': while the parent is smaller than this node, swap with the parent and move up.",
+        why: "Unlike extract (which sinks DOWN from the root), insert starts at the BOTTOM and rises UP \u2014 it's the mirror-image operation.",
+        trigger: "Insert at the end, bubble UP. Extract removes from top, sinks DOWN.",
+        code: `void heap_insert(int A[], int *n, int key) {
+    A[*n] = key;
+    int i = *n;
+    (*n)++;
+    while (i > 0 && A[(i-1)/2] < A[i]) {
+        swap(&A[i], &A[(i-1)/2]);
+        i = (i-1)/2;
+    }
+}`
+      },
+      {
+        name: "heap_sort",
+        when: "Sort an array in ascending order using a heap.",
+        logic: "Build a max-heap of the whole array. Then repeatedly: swap the root (biggest remaining) with the last unsorted element, shrink the heap by one, and re-heapify from the top.",
+        why: "Each extraction pulls the current largest value to its correct final position at the end of the array \u2014 doing this n times in shrinking heap regions sorts the whole array.",
+        trigger: "Build once. Then swap-shrink-heapify, n-1 times.",
+        code: `void heap_sort(int A[], int n) {
+    build_max_heap(A, n);
+    for (int i = n - 1; i >= 1; i--) {
+        swap(&A[0], &A[i]);
+        max_heapify(A, i, 0);
+    }
+}`
+      }
+    ]
+  },
+  suffix: {
+    label: "Suffix arrays",
+    icon: "ti-sort-ascending-letters",
+    items: [
+      {
+        name: "compare_suffix_prefix",
+        when: "Compare a pattern P against the suffix of T starting at some position \u2014 the building block for suffix array search.",
+        logic: "Walk forward while both strings still have characters left AND those characters match. Stop when either runs out or they differ. If P ran out first, P is fully a prefix \u2014 return 0. Otherwise compare the differing characters to decide -1 or 1.",
+        why: "Checking BOTH T[start+i] != '\\0' and P[i] != '\\0' prevents reading past the end of either string \u2014 dropping either check risks reading garbage memory.",
+        trigger: "Loop needs THREE conditions: P not done, T not done, characters match.",
+        code: `int compare_suffix_prefix(char T[], int start, char P[]) {
+    int i = 0;
+    while (P[i] != '\\0' && T[start+i] != '\\0'
+           && P[i] == T[start+i]) {
+        i++;
+    }
+    if (P[i] == '\\0') {
+        return 0;
+    }
+    if (T[start+i] < P[i]) {
+        return -1;
+    }
+    return 1;
+}`
+      },
+      {
+        name: "first_match_row",
+        when: "Binary search a suffix array to find the FIRST row matching pattern P.",
+        logic: "Standard binary search with lo/hi/mid. On a match (cmp==0), record mid as a candidate result, but keep searching LEFT (hi = mid-1) in case there's an earlier match. On cmp<0, go right. On cmp>0, go left.",
+        why: "Multiple suffixes can match P as a prefix (e.g. P='a' matches many). Returning immediately on the first match found might not be the FIRST in sorted order \u2014 you must keep narrowing left even after finding one.",
+        trigger: "Found a match? Don't return yet \u2014 save it, then hi = mid - 1.",
+        code: `int first_match_row(char T[], int SA[], int n, char P[]) {
+    int lo = 0, hi = n - 1, result = -1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        int cmp = compare_suffix_prefix(T, SA[mid], P);
+        if (cmp == 0) {
+            result = mid;
+            hi = mid - 1;
+        } else if (cmp < 0) {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return result;
+}`
+      }
+    ]
+  },
+  kmp: {
+    label: "Strings / KMP",
+    icon: "ti-search",
+    items: [
+      {
+        name: "brute_force_search",
+        when: "Find pattern P inside text T, the slow but simple way.",
+        logic: "Try every possible starting shift s in T. At each shift, compare characters of P against T one by one. Full match \u2192 return the shift. No shift works \u2192 return -1.",
+        why: "This is O(n\u00b7m) because for each of the n possible shifts you might compare up to m characters \u2014 KMP exists specifically to avoid this by reusing earlier comparison work.",
+        trigger: "Outer loop = every shift. Inner loop = character-by-character match at that shift.",
+        code: `int brute_force_search(char T[], int n, char P[], int m) {
+    for (int s = 0; s <= n - m; s++) {
+        int i = 0;
+        while (i < m && T[s+i] == P[i]) {
+            i++;
+        }
+        if (i == m) return s;
+    }
+    return -1;
+}`
+      },
+      {
+        name: "build_failure",
+        when: "Precompute KMP's failure function F[] for pattern P, before searching.",
+        logic: "F[0] is always -1. Then walk i from 1: if P[i] matches P[j], record F[i]=j and advance both. If not and j>0, fall back j = F[j-1]+1 and retry. If j is already 0, F[i]=0 and move on.",
+        why: "F[i] tells you, for a mismatch at position i, how far back in the pattern you can safely resume from \u2014 without re-checking characters you already know matched.",
+        trigger: "This is the table that powers the 'skip without rechecking' trick in kmp_search.",
+        code: `void build_failure(char P[], int m, int F[]) {
+    F[0] = -1;
+    int i = 1, j = 0;
+    while (i < m) {
+        if (P[i] == P[j]) {
+            F[i] = j;
+            i++; j++;
+        } else if (j > 0) {
+            j = F[j-1] + 1;
+        } else {
+            F[i] = 0;
+            i++;
+        }
+    }
+}`
+      },
+      {
+        name: "kmp_search",
+        when: "Find pattern P inside text T in O(n+m) using the precomputed failure function.",
+        logic: "Track a shift s and a match-length i. On a character match, advance i (full match at i==m means found, return s). On a mismatch, use F[i] to jump the shift forward WITHOUT resetting i all the way to 0.",
+        why: "Instead of restarting the whole comparison from scratch on every mismatch (like brute force), KMP reuses the fact that part of the pattern was ALREADY confirmed to match \u2014 that's where the speed comes from.",
+        trigger: "Mismatch doesn't reset to s+1, i=0 \u2014 it jumps using F[i].",
+        code: `int kmp_search(char T[], int n, char P[], int m, int F[]) {
+    int s = 0, i = 0;
+    while (s <= n - m) {
+        if (T[s+i] == P[i]) {
+            i++;
+            if (i == m) return s;
+        } else {
+            s = s + i - F[i];
+            i = (F[i] > 0) ? F[i] : 0;
+        }
+    }
+    return -1;
+}`
+      }
+    ]
+  },
+  majority: {
+    label: "Majority vote",
+    icon: "ti-users",
+    items: [
+      {
+        name: "has_majority (brute force)",
+        when: "Check if any value appears more than n/2 times \u2014 the simple O(n\u00b2) version.",
+        logic: "For each element, count how many times that exact value appears anywhere in the array. If any count exceeds n/2, return 1. If nothing qualifies after checking everyone, return 0.",
+        why: "You don't know in advance which value might be the majority, so you must check every element as a candidate \u2014 n candidates, each needing an n-step scan to count.",
+        trigger: "Outer loop picks a candidate. Inner loop counts it. O(n\u00b2) time, O(1) space.",
+        code: `int has_majority(int S[], int n) {
+    for (int i = 0; i < n; i++) {
+        int count = 0;
+        for (int j = 0; j < n; j++) {
+            if (S[j] == S[i]) count++;
+        }
+        if (count > n / 2) return 1;
+    }
+    return 0;
+}`
+      },
+      {
+        name: "has_majority (Boyer-Moore, O(n))",
+        when: "Same check, but in O(n) time and O(1) space \u2014 the hardest single function in the course.",
+        logic: "PHASE 1 (find candidate): keep one candidate + a count. If count is 0, the current value becomes the new candidate (count=1). Matches the candidate \u2192 count++. Doesn't match \u2192 count--. PHASE 2 (verify): scan the WHOLE array again counting how many times the candidate actually appears. Only return 1 if that real count beats n/2.",
+        why: "Phase 1 alone can be WRONG if there's no true majority \u2014 it always produces some leftover candidate, valid or not. Phase 2 exists purely to catch that lie with a second honest count.",
+        trigger: "Two separate passes. Phase 1 finds a GUESS. Phase 2 checks if the guess is real.",
+        code: `int has_majority(int S[], int n) {
+    int candidate = 0, count = 0;
+    for (int i = 0; i < n; i++) {
+        if (count == 0) {
+            candidate = S[i];
+            count = 1;
+        } else if (S[i] == candidate) {
+            count++;
+        } else {
+            count--;
+        }
+    }
+    int actual = 0;
+    for (int i = 0; i < n; i++) {
+        if (S[i] == candidate) actual++;
+    }
+    return actual > n / 2;
+}`
+      }
+    ]
+  }
+};
+
+const state = { activeTab: "hash", expanded: {} };
+
+function render() {
+  const app = document.getElementById("app");
+  const tabs = Object.keys(DATA);
+
+  let tabsHtml = tabs.map(key => {
+    const isActive = key === state.activeTab;
+    return `<button data-tab="${key}" style="
+      display:flex; align-items:center; gap:6px;
+      padding:8px 14px; font-size:13px; font-weight:500;
+      border:0.5px solid ${isActive ? 'var(--color-border-info)' : 'var(--color-border-tertiary)'};
+      background:${isActive ? 'var(--color-background-info)' : 'var(--color-background-primary)'};
+      color:${isActive ? 'var(--color-text-info)' : 'var(--color-text-secondary)'};
+      border-radius:var(--border-radius-md); cursor:pointer; white-space:nowrap;
+    "><i class="ti ${DATA[key].icon}" style="font-size:15px" aria-hidden="true"></i>${DATA[key].label}</button>`;
+  }).join("");
+
+  const activeItems = DATA[state.activeTab].items;
+  let itemsHtml = activeItems.map((item, idx) => {
+    const key = state.activeTab + "_" + idx;
+    const isOpen = !!state.expanded[key];
+    return `
+    <div style="border:0.5px solid var(--color-border-tertiary); border-radius:var(--border-radius-lg); margin-bottom:10px; overflow:hidden;">
+      <button data-toggle="${key}" style="
+        width:100%; display:flex; align-items:center; justify-content:space-between;
+        padding:12px 16px; background:var(--color-background-primary); border:none;
+        cursor:pointer; text-align:left;
+      ">
+        <span style="font-size:14px; font-weight:500; font-family:var(--font-mono); color:var(--color-text-primary);">${item.name}</span>
+        <i class="ti ${isOpen ? 'ti-chevron-up' : 'ti-chevron-down'}" style="font-size:16px; color:var(--color-text-tertiary);" aria-hidden="true"></i>
+      </button>
+      ${isOpen ? `
+      <div style="padding:0 16px 16px; border-top:0.5px solid var(--color-border-tertiary);">
+        <div style="margin-top:12px;">
+          <p style="font-size:11px; font-weight:500; color:var(--color-text-tertiary); margin:0 0 4px; text-transform:uppercase; letter-spacing:0.03em;">When you'd need it</p>
+          <p style="font-size:13px; color:var(--color-text-secondary); margin:0 0 14px; line-height:1.6;">${item.when}</p>
+        </div>
+        <div style="margin-bottom:14px;">
+          <p style="font-size:11px; font-weight:500; color:var(--color-text-tertiary); margin:0 0 4px; text-transform:uppercase; letter-spacing:0.03em;">Logic</p>
+          <p style="font-size:13px; color:var(--color-text-secondary); margin:0; line-height:1.7; white-space:pre-line;">${item.logic}</p>
+        </div>
+        <div style="margin-bottom:14px;">
+          <p style="font-size:11px; font-weight:500; color:var(--color-text-tertiary); margin:0 0 4px; text-transform:uppercase; letter-spacing:0.03em;">Why it works</p>
+          <p style="font-size:13px; color:var(--color-text-secondary); margin:0; line-height:1.7;">${item.why}</p>
+        </div>
+        <div style="margin-bottom:14px; padding:10px 12px; background:var(--color-background-secondary); border-radius:var(--border-radius-md);">
+          <p style="font-size:11px; font-weight:500; color:var(--color-text-tertiary); margin:0 0 4px; text-transform:uppercase; letter-spacing:0.03em;">Exam memory trigger</p>
+          <p style="font-size:13px; color:var(--color-text-primary); margin:0; line-height:1.6; font-weight:500;">${item.trigger}</p>
+        </div>
+        <div>
+          <p style="font-size:11px; font-weight:500; color:var(--color-text-tertiary); margin:0 0 6px; text-transform:uppercase; letter-spacing:0.03em;">Code</p>
+          <pre style="background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:12px 14px; font-size:12.5px; font-family:var(--font-mono); overflow-x:auto; margin:0; line-height:1.5; color:var(--color-text-primary);">${item.code.replace(/</g,"&lt;").replace(/>/g,"&gt;")}</pre>
+        </div>
+      </div>` : ''}
+    </div>`;
+  }).join("");
+
+  app.innerHTML = `
+    <div style="display:flex; gap:6px; overflow-x:auto; padding-bottom:12px; margin-bottom:14px; border-bottom:0.5px solid var(--color-border-tertiary);">
+      ${tabsHtml}
+    </div>
+    <div>${itemsHtml}</div>
+  `;
+
+  app.querySelectorAll("[data-tab]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      state.activeTab = btn.getAttribute("data-tab");
+      render();
+    });
+  });
+  app.querySelectorAll("[data-toggle]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const key = btn.getAttribute("data-toggle");
+      state.expanded[key] = !state.expanded[key];
+      render();
+    });
+  });
+}
+
+render();
+</script>
